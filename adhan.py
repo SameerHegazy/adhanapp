@@ -2,7 +2,8 @@
 """
 Adhan app — كامل: auto-update (GitHub version.txt), mapping (lat/lon/tz/method),
 offline fallback, GUI عربي مودرن (Light), system tray, startup on Windows,
-single instance robust check, play adhan 10s, update prayer times every 30m.
+robust single-instance check (psutil PID check + socket fallback), play adhan 10s,
+update prayer times every 30m.
 By SMRH
 """
 
@@ -52,12 +53,11 @@ except Exception:
     winreg = None
 
 # ------------------ إعداد روابط GitHub raw (غيّرها لو احتجت) ------------------
-# استخدمت الروابط اللي ادتهالى. لو غيرتها على GitHub، عدّلها هنا.
-REMOTE_VERSION_URL = "https://raw.githubusercontent.com/SameerHegazy/adhanapp/main/version.txt"
-REMOTE_CITIES_URL  = "https://raw.githubusercontent.com/SameerHegazy/adhanapp/main/cities.json"
-REMOTE_THEME_URL   = "https://raw.githubusercontent.com/SameerHegazy/adhanapp/main/theme.json"
-REMOTE_ADHAN_URL   = "https://raw.githubusercontent.com/SameerHegazy/adhanapp/main/adhan.mp3"
-REMOTE_PY_URL      = "https://raw.githubusercontent.com/SameerHegazy/adhanapp/main/adhan.py"
+REMOTE_VERSION_URL = "https://raw.githubusercontent.com/SameerHegazy/adhanapp/refs/heads/main/version.txt"
+REMOTE_CITIES_URL  = "https://raw.githubusercontent.com/SameerHegazy/adhanapp/refs/heads/main/cities.json"
+REMOTE_THEME_URL   = "https://raw.githubusercontent.com/SameerHegazy/adhanapp/refs/heads/main/theme.json"
+REMOTE_ADHAN_URL   = "https://github.com/SameerHegazy/adhanapp/raw/refs/heads/main/adhan.mp3"
+REMOTE_PY_URL      = "https://raw.githubusercontent.com/SameerHegazy/adhanapp/refs/heads/main/adhan.py"
 
 FILES_TO_UPDATE = {
     "cities.json": REMOTE_CITIES_URL,
@@ -117,43 +117,49 @@ def safe_write_json(path, obj):
         json.dump(obj, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
-# ------------------ فحص نسخة واحدة قيد التشغيل ------------------
-def find_existing_process():
+# ------------------ فحص نسخة واحدة قيد التشغيل (مُحسّن) ------------------
+def check_single_instance():
     """
-    Try to find another running process of this script.
-    Uses psutil if available; otherwise fallback to socket binding.
-    Returns True if another process exists.
+    Return a tuple (status, payload)
+    - If we obtain a socket (no other instance) -> ("socket", socket_object)
+    - If another process found via psutil -> ("exists", pid)
+    - If socket bind fails (port in use) but psutil not conclusive -> ("exists", True)
     """
-    # psutil method: look for same executable path (robust)
-    if psutil:
-        try:
-            current_pid = os.getpid()
-            current_path = os.path.abspath(sys.argv[0]).lower()
-            for proc in psutil.process_iter(['pid','exe','cmdline','name']):
+    # Prefer psutil-based detection if available
+    try:
+        current_pid = os.getpid()
+        script_basename = os.path.basename(sys.argv[0]).lower()
+        if psutil:
+            for proc in psutil.process_iter(['pid', 'exe', 'cmdline', 'name']):
                 try:
                     pid = proc.info['pid']
                     if pid == current_pid:
                         continue
-                    exe = proc.info.get('exe') or ""
-                    cmd = " ".join(proc.info.get('cmdline') or [])
-                    # check if exe path or script path matches
-                    if exe and current_path.endswith(os.path.basename(exe).lower()):
-                        # tricky: compare base names to avoid false positives
-                        return True
-                    if sys.argv[0] in cmd or os.path.basename(sys.argv[0]) in cmd:
-                        return True
+                    # check exe path or cmdline or process name for our script/exe basename
+                    exe = (proc.info.get('exe') or "").lower()
+                    name = (proc.info.get('name') or "").lower()
+                    cmdline = " ".join(proc.info.get('cmdline') or []).lower()
+                    if script_basename in name or script_basename in exe or script_basename in cmdline:
+                        return ("exists", pid)
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
-        except Exception:
-            pass
-    # fallback: try to bind localhost port
+    except Exception:
+        pass
+
+    # fallback: try to bind to a localhost port (atomic)
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         s.bind(('127.0.0.1', SINGLETON_PORT))
-        # keep it open by returning socket to caller who will hold reference
-        return s
+        # success -> keep socket open to reserve port
+        return ("socket", s)
     except socket.error:
-        return True
+        # port busy -> assume another instance exists
+        try:
+            s.close()
+        except:
+            pass
+        return ("exists", True)
 
 # ------------------ إدارة config محلي ------------------
 def load_config():
@@ -218,7 +224,6 @@ def perform_silent_update_if_needed():
         # download files; for adhan.py download too then restart
         for name, url in FILES_TO_UPDATE.items():
             dest = os.path.abspath(name)
-            # attempt download
             ok = download_file(url, dest)
             if not ok:
                 print(f"Warning: failed to download {name}")
@@ -253,10 +258,6 @@ def load_cities_mapping():
     return doc
 
 def fetch_prayer_times_for(city_name, country_key, mapping):
-    """
-    Use lat/lon/tz/method from mapping to call aladhan API.
-    Returns timings dict or None.
-    """
     entry = mapping.get(country_key, {}).get(city_name)
     if not entry:
         return None
@@ -340,17 +341,16 @@ class AdhanPlayer:
 
 # ------------------ الواجهة الرئيسية والتشغيل ------------------
 class PrayerApp:
-    def __init__(self):
+    def __init__(self, singleton_socket=None):
         self.cfg = load_config()
         self.cities_map = load_cities_mapping()
         self.ad_player = AdhanPlayer(mp3_path="adhan.mp3", volume=self.cfg.get("volume", 80)/100.0)
         self.timings = {}
         self.triggered = set()
         self.running = True
-        self.singleton_socket = None
+        self.singleton_socket = singleton_socket
 
         # GUI (ttkbootstrap) — لو مش مثبت هيعمل استعمال محدود لتكينتر
-        self.root = None
         if tb:
             self.root = tb.Window(themename="flatly")
         else:
@@ -370,16 +370,6 @@ class PrayerApp:
 
         # widgets
         self.create_widgets()
-
-        # single instance handling
-        p = find_existing_process()
-        if isinstance(p, socket.socket):
-            # we got the socket — hold it to keep binding
-            self.singleton_socket = p
-        elif p is True:
-            # another instance exists -> warn and exit
-            messagebox.showwarning("تنبيه", "البرنامج مفتوح بالفعل!")
-            sys.exit(0)
 
         # add to startup if configured
         if self.cfg.get("auto_start", True):
@@ -704,18 +694,22 @@ def main():
         perform_silent_update_if_needed()
     except:
         pass
-    app = PrayerApp()
+    # check single-instance and either obtain socket or exit politely
+    status, payload = check_single_instance()
+    if status == "exists":
+        # show notification/information and exit
+        try:
+            messagebox.showinfo("تنبيه", "البرنامج يعمل بالفعل على هذا الجهاز. إذا كنت ترغب في فتح النافذة، تأكد من إغلاق النسخة الأخرى أو البحث عنها في شريط المهام.")
+        except:
+            print("البرنامج يعمل بالفعل.")
+        sys.exit(0)
+    elif status == "socket":
+        singleton_socket = payload
+    else:
+        singleton_socket = None
+
+    app = PrayerApp(singleton_socket=singleton_socket)
     app.run()
 
 if __name__ == "__main__":
-    # robust single-instance check
-    p = find_existing_process()
-    if isinstance(p, socket.socket):
-        # we obtained socket and hold it open inside PrayerApp.singleton_socket later
-        # continue
-        pass
-    elif p is True:
-        # another instance detected
-        messagebox.showwarning("تنبيه", "البرنامج مفتوح بالفعل!")
-        sys.exit(0)
     main()
