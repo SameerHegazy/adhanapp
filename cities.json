@@ -1,0 +1,18 @@
+{
+  "الرياض": {"lat": 24.7136, "lng": 46.6753, "timezone": "Asia/Riyadh", "method": 4},
+  "دمياط": {"lat": 31.4165, "lng": 31.8133, "timezone": "Africa/Cairo", "method": 5},
+  "القاهرة": {"lat": 30.0444, "lng": 31.2357, "timezone": "Africa/Cairo", "method": 5},
+  "دبي": {"lat": 25.276987, "lng": 55.296249, "timezone": "Asia/Dubai", "method": 4},
+  "الدوحة": {"lat": 25.2854, "lng": 51.5310, "timezone": "Asia/Qatar", "method": 4},
+  "الكويت": {"lat": 29.3759, "lng": 47.9774, "timezone": "Asia/Kuwait", "method": 4},
+  "مسقط": {"lat": 23.5859, "lng": 58.4059, "timezone": "Asia/Muscat", "method": 4},
+  "بغداد": {"lat": 33.3152, "lng": 44.3661, "timezone": "Asia/Baghdad", "method": 5},
+  "بيروت": {"lat": 33.8938, "lng": 35.5018, "timezone": "Asia/Beirut", "method": 5},
+  "الخرطوم": {"lat": 15.5007, "lng": 32.5599, "timezone": "Africa/Khartoum", "method": 5},
+  "مكة": {"lat": 21.3891, "lng": 39.8579, "timezone": "Asia/Riyadh", "method": 4},
+  "المدينة المنورة": {"lat": 24.5247, "lng": 39.5692, "timezone": "Asia/Riyadh", "method": 4},
+  "جدة": {"lat": 21.2854, "lng": 39.2376, "timezone": "Asia/Riyadh", "method": 4},
+  "الجزائر": {"lat": 36.7538, "lng": 3.0422, "timezone": "Africa/Algiers", "method": 2},
+  "تونس": {"lat": 36.8065, "lng": 10.1815, "timezone": "Africa/Tunis", "method": 2},
+  "الدار البيضاء": {"lat": 33.5731, "lng": -7.5898, "timezone": "Africa/Casablanca", "method": 2}
+}
