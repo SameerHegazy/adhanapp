@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Adhan app — كامل بالـ auto-update من GitHub (حسب version.txt)،
-offline fallback، mapping (lat/lon/tz) للمدن، GUI عربي مودرن Light،
-system tray، startup on Windows، منع نسخ متعددة، تشغيل أذان 10s.
+Adhan app — تحديث تلقائي من GitHub حسب version.txt،
+mapping للمدن (lat/lon/tz/method)، offline fallback، GUI عربي مودرن (Light),
+system tray, startup on Windows, single instance, play adhan 10s.
 By SMRH
 """
 
@@ -13,12 +13,10 @@ import time
 import threading
 import requests
 import socket
-import shutil
-import tempfile
 from datetime import datetime
 from pathlib import Path
 
-# GUI & media
+# GUI & audio
 import pygame
 import pystray
 from PIL import Image, ImageDraw
@@ -26,57 +24,56 @@ import ttkbootstrap as tb
 from ttkbootstrap.constants import *
 import tkinter.messagebox as messagebox
 
-# Windows startup requires winreg - import lazily to avoid errors on non-windows
+# Optional Windows reg access
 try:
     import winreg
 except Exception:
     winreg = None
 
-# ---------------- Configuration (عدل الروابط هنا لو احتجت) ----------------
-# روابط raw على GitHub (انت حطيتهم من قبل) — استخدمها كما هي أو عدّل
-RAW_BASE = "https://raw.githubusercontent.com/SameerHegazy/adhanapp/main"
+# ------------- CONFIG: raw links on GitHub -------------
+# ** عدّل هذه الروابط لو لزم **
 RAW_VERSION = "https://raw.githubusercontent.com/SameerHegazy/adhanapp/main/version.txt"
-RAW_CITIES = "https://raw.githubusercontent.com/SameerHegazy/adhanapp/main/cities.json"
-RAW_THEME = "https://raw.githubusercontent.com/SameerHegazy/adhanapp/main/theme.json"
-RAW_ADHAN_MP3 = "https://raw.githubusercontent.com/SameerHegazy/adhanapp/main/adhan.mp3"
+RAW_CITIES   = "https://raw.githubusercontent.com/SameerHegazy/adhanapp/main/cities.json"
+RAW_THEME    = "https://raw.githubusercontent.com/SameerHegazy/adhanapp/main/theme.json"
+RAW_ADHAN_MP3= "https://raw.githubusercontent.com/SameerHegazy/adhanapp/main/adhan.mp3"
 RAW_ADHAN_PY = "https://raw.githubusercontent.com/SameerHegazy/adhanapp/main/adhan.py"
 
-# Files that will be updated if a new version is detected
 FILES_TO_UPDATE = {
     "cities.json": RAW_CITIES,
     "theme.json": RAW_THEME,
     "adhan.mp3": RAW_ADHAN_MP3,
-    "adhan.py": RAW_ADHAN_PY  # optional: will be downloaded and program will restart to use it
+    "adhan.py": RAW_ADHAN_PY
 }
+
 REMOTE_VERSION_URL = RAW_VERSION
 LOCAL_VERSION_FILE = "version.txt"
 
-# API & timing
+# API and intervals
 ALADHAN_API = "http://api.aladhan.com/v1/timings"
-UPDATE_INTERVAL = 1800  # 30 minutes update timings
-CHECK_INTERVAL = 5      # check prayer time every 5 seconds
-ADHAN_DURATION = 10     # play adhan for 10 seconds
+UPDATE_INTERVAL = 1800   # 30 minutes
+CHECK_INTERVAL = 5       # check prayer every 5 seconds
+ADHAN_DURATION = 10      # seconds
 
-# Local config (per device) - this file is NOT updated from GitHub
+# local config (per-device, not pushed to GitHub)
 CONFIG_FILE = "config.json"
 DEFAULT_CONFIG = {
-    "city_country": ["القاهرة", "Egypt"],  # [city, countryKeyFromCitiesJson]
+    "city_country": ["القاهرة", "Egypt"],  # [cityName, countryKeyFromCitiesJson]
     "volume": 80,
     "adhan_enabled": True,
     "auto_start": True
 }
 
-# local cache files
+# local files
 LOCAL_CITIES = "cities.json"
-LOCAL_THEME = "theme.json"
+LOCAL_THEME  = "theme.json"
 LOCAL_PRAYER_CACHE = "prayer_times_cache.json"
 
-# prevent multiple instances (bind to localhost port)
+# single instance port
 SINGLETON_PORT = 65432
 
-# ---------------- Utility functions ----------------
+# ---------------- utilities ----------------
 def resource_path(p):
-    """Get path whether running from source or PyInstaller."""
+    """Path for PyInstaller compatibility."""
     try:
         base = sys._MEIPASS
     except Exception:
@@ -103,9 +100,8 @@ def safe_write_json(path, obj):
         json.dump(obj, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
-# ---------------- Single instance ----------------
+# ---------------- single instance ----------------
 def check_already_running():
-    """Bind a localhost port to prevent second instance. Returns socket if obtained."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         s.bind(('127.0.0.1', SINGLETON_PORT))
@@ -113,13 +109,13 @@ def check_already_running():
     except socket.error:
         return None
 
-# ---------------- Config handling (local only) ----------------
+# ---------------- config local ----------------
 def load_config():
     cfg = DEFAULT_CONFIG.copy()
     doc = safe_load_json(CONFIG_FILE)
     if isinstance(doc, dict):
         cfg.update(doc)
-    # ensure fields
+    # ensure keys
     if "city_country" not in cfg:
         cfg["city_country"] = DEFAULT_CONFIG["city_country"]
     if "volume" not in cfg:
@@ -131,14 +127,15 @@ def load_config():
 def save_config(cfg):
     safe_write_json(CONFIG_FILE, cfg)
 
-# ---------------- Auto-update (check version.txt and download) ----------------
+# ---------------- version & update ----------------
 def get_remote_version():
     try:
         r = requests.get(REMOTE_VERSION_URL, timeout=6)
         if r.status_code == 200:
             return r.text.strip()
     except:
-        return None
+        pass
+    return None
 
 def get_local_version():
     try:
@@ -147,27 +144,23 @@ def get_local_version():
     except:
         return "0"
 
-def download_file(url, dest_path):
+def download_file(url, dest):
     try:
         r = requests.get(url, stream=True, timeout=15)
         r.raise_for_status()
-        # write to temp then replace
-        tmp = dest_path + ".tmp"
+        tmp = dest + ".tmp"
         with open(tmp, "wb") as f:
-            for chunk in r.iter_content(chunk_size=8192):
+            for chunk in r.iter_content(8192):
                 if chunk:
                     f.write(chunk)
-        os.replace(tmp, dest_path)
+        os.replace(tmp, dest)
         return True
     except Exception as e:
-        print(f"download_file error {url} -> {e}")
+        print(f"download_file error {url}: {e}")
         return False
 
-def perform_update_silent():
-    """
-    If remote version > local version, download files in FILES_TO_UPDATE.
-    After download, write LOCAL_VERSION_FILE and restart program to load new adhan.py.
-    """
+def perform_update_if_needed_silent():
+    """If remote version > local version, download files then restart."""
     try:
         remote = get_remote_version()
         local = get_local_version()
@@ -175,67 +168,44 @@ def perform_update_silent():
             return False
         if remote == local:
             return False
-        # download files
-        for fname, url in FILES_TO_UPDATE.items():
-            dest = os.path.abspath(fname)
-            # if updating current script (adhan.py), download but we'll restart after finishing all
+        # download listed files (except adhan.py handled last)
+        for name, url in FILES_TO_UPDATE.items():
+            dest = os.path.abspath(name)
             ok = download_file(url, dest)
             if not ok:
-                print(f"Failed to update {fname}")
-        # update local version file
+                print(f"Failed to update {name}")
+        # update version file locally
         with open(LOCAL_VERSION_FILE, "w", encoding="utf-8") as f:
             f.write(remote)
-        # restart program silently
+        # restart program to load new adhan.py
         python = sys.executable
         os.execv(python, [python] + sys.argv)
         return True
     except Exception as e:
-        print("perform_update_silent error:", e)
+        print("perform_update_if_needed_silent error:", e)
         return False
 
-# ---------------- Load theme & cities (try online first, else local) ----------------
-def update_local_files_if_version_changed():
-    """Check remote version and download updated files (silent)."""
+def ensure_local_data():
+    """Try to download cities/theme/adhan.mp3 if online (non-forcing)."""
     if not is_online():
         return
-    try:
-        remote = get_remote_version()
-        local = get_local_version()
-        if remote and remote != local:
-            # silent update
-            perform_update_silent()
-    except:
-        pass
+    for name, url in FILES_TO_UPDATE.items():
+        # we will download everything (including adhan.mp3) but adhan.py already handled in update flow
+        if name == "adhan.py":
+            continue
+        try:
+            download_file(url, os.path.abspath(name))
+        except:
+            pass
 
-def ensure_local_data():
-    """Ensure cities.json and theme.json exist locally by trying to download them,
-       otherwise keep existing local copies."""
-    # try to download each file if online
-    if is_online():
-        for fname, url in FILES_TO_UPDATE.items():
-            # skip adhan.py here because updating that triggers restart handled in update process
-            if fname == "adhan.py":
-                continue
-            try:
-                download_file(url, os.path.abspath(fname))
-            except:
-                pass
-
-# ---------------- Prayer times fetching using mapping (lat/lon/timezonestring) ----------------
+# ---------------- cities mapping & fetching ----------------
 def get_city_mapping():
-    """Return mapping loaded from local cities.json. Expected structure:
-       { "CountryKey": { "CityName": {"lat":..,"lon":..,"tz":"..","method":int}, ... }, ... }
-    """
     doc = safe_load_json(LOCAL_CITIES)
     if not isinstance(doc, dict):
         return {}
     return doc
 
 def fetch_prayer_times_for(city_name, country_key, mapping):
-    """
-    Use city's lat/lon/tz/method to call aladhan API timings endpoint.
-    Returns dict of timings on success or None.
-    """
     entry = mapping.get(country_key, {}).get(city_name)
     if not entry:
         return None
@@ -256,7 +226,6 @@ def fetch_prayer_times_for(city_name, country_key, mapping):
         data = r.json()
         if data.get("code") == 200 and "data" in data:
             timings = data["data"]["timings"]
-            # save cache
             safe_write_json(LOCAL_PRAYER_CACHE, {
                 "fetched_at": datetime.now().isoformat(),
                 "city": city_name,
@@ -266,22 +235,24 @@ def fetch_prayer_times_for(city_name, country_key, mapping):
             return timings
     except Exception as e:
         print("fetch_prayer_times_for error:", e)
-        # fallback to cache
+    # fallback to cache
     cached = safe_load_json(LOCAL_PRAYER_CACHE)
     if cached and cached.get("city") == city_name:
         return cached.get("timings")
     return None
 
-# ---------------- Adhan player ----------------
+# ---------------- adhan player ----------------
 class AdhanPlayer:
     def __init__(self, mp3_path="adhan.mp3", volume=0.8):
         pygame.mixer.init()
-        self.mp3 = resource_path(mp3_path) if os.path.exists(resource_path(mp3_path)) else mp3_path
+        self.mp3 = mp3_path if os.path.exists(mp3_path) else resource_path(mp3_path)
         self.volume = volume
         self._lock = threading.Lock()
         try:
             self.sound = pygame.mixer.Sound(self.mp3)
-        except Exception:
+            self.sound.set_volume(self.volume)
+        except Exception as e:
+            print("AdhanPlayer load error:", e)
             self.sound = None
 
     def set_volume(self, v):
@@ -290,7 +261,7 @@ class AdhanPlayer:
             self.sound.set_volume(self.volume)
 
     def play(self, duration=ADHAN_DURATION):
-        def _play_once():
+        def _p():
             with self._lock:
                 try:
                     if self.sound:
@@ -298,8 +269,8 @@ class AdhanPlayer:
                         time.sleep(duration)
                         pygame.mixer.stop()
                 except Exception as e:
-                    print("AdhanPlayer.play error:", e)
-        t = threading.Thread(target=_play_once, daemon=True)
+                    print("AdhanPlayer play error:", e)
+        t = threading.Thread(target=_p, daemon=True)
         t.start()
 
     def stop(self):
@@ -309,10 +280,9 @@ class AdhanPlayer:
             except:
                 pass
 
-# ---------------- GUI & main app ----------------
+# ---------------- Main GUI app ----------------
 class PrayerApp:
     def __init__(self):
-        # load local config
         self.cfg = load_config()
         self.cities_map = get_city_mapping()
         self.ad_player = AdhanPlayer(mp3_path="adhan.mp3", volume=self.cfg.get("volume", 80)/100.0)
@@ -321,10 +291,10 @@ class PrayerApp:
         self.running = True
         self.sock = None
 
-        # create gui
+        # GUI
         self.root = tb.Window(themename="flatly")
         self.root.title("مواقيت الصلاة - By SMRH")
-        self.root.geometry("480x560")
+        self.root.geometry("480x580")
         try:
             ico = resource_path("icon.ico")
             if os.path.exists(ico):
@@ -333,26 +303,35 @@ class PrayerApp:
             pass
         self.root.protocol("WM_DELETE_WINDOW", self.minimize_to_tray)
 
-        # styling and load theme.json
+        # load theme
         self.load_theme()
 
         # widgets
         self.create_widgets()
 
-        # prevent multiple instances
+        # single instance
         self.sock = check_already_running()
         if not self.sock:
             messagebox.showwarning("تنبيه", "البرنامج مفتوح بالفعل!")
             sys.exit(0)
 
-        # set startup registry if requested
+        # add to startup
         if self.cfg.get("auto_start", True):
             try:
                 add_to_startup()
             except:
                 pass
 
-        # initial fetch of prayer times (online or cached)
+        # ensure local data (download mapping/theme/adhan.mp3 if online)
+        ensure_local_data()
+
+        # perform silent update if version changed (this may restart)
+        try:
+            perform_update_if_needed_silent()
+        except:
+            pass
+
+        # initial fetch timings
         self.update_prayer_times()
 
         # start background loops
@@ -360,7 +339,6 @@ class PrayerApp:
 
     def load_theme(self):
         theme = safe_load_json(LOCAL_THEME) or {}
-        # font and colors — fallback defaults
         self.font_family = theme.get("font", {}).get("family", "Tahoma")
         self.font_size = theme.get("font", {}).get("size", 12)
         self.colors = theme.get("colors", {
@@ -370,18 +348,17 @@ class PrayerApp:
         })
 
     def create_widgets(self):
-        frm = tb.Frame(self.root, padding=10)
+        frm = tb.Frame(self.root, padding=12)
         frm.pack(fill="both", expand=True)
 
-        tb.Label(frm, text="اختر مدينتك:", font=(self.font_family, self.font_size+2, "bold")).pack(anchor="w", pady=(2,6))
+        tb.Label(frm, text="اختر دولتك:", font=(self.font_family, self.font_size+2, "bold")).pack(anchor="w", pady=(2,6))
 
-        # Countries and cities from mapping
         self.country_var = tb.StringVar()
         self.city_var = tb.StringVar()
 
         country_keys = list(self.cities_map.keys()) if self.cities_map else []
         if not country_keys:
-            country_keys = ["Egypt"]  # fallback
+            country_keys = ["Egypt"]
 
         self.country_combo = tb.Combobox(frm, values=country_keys, textvariable=self.country_var, state="readonly", bootstyle="info")
         self.country_combo.pack(fill="x")
@@ -392,15 +369,13 @@ class PrayerApp:
         self.city_combo.pack(fill="x")
         self.city_combo.bind("<<ComboboxSelected>>", self.on_city_changed)
 
-        # restore selection from config
+        # restore selection
         sel_city, sel_country = self.cfg.get("city_country", DEFAULT_CONFIG["city_country"])
         if sel_country in country_keys and sel_city in (self.cities_map.get(sel_country, {}) if self.cities_map else {}):
             self.country_var.set(sel_country)
-            # populate cities then set
             self.populate_cities(sel_country)
             self.city_var.set(sel_city)
         else:
-            # default to first country and first city
             self.country_var.set(country_keys[0])
             self.populate_cities(country_keys[0])
             first_city = list(self.cities_map.get(country_keys[0], {}).keys())[0] if self.cities_map else ""
@@ -439,10 +414,8 @@ class PrayerApp:
     def on_country_changed(self, e=None):
         c = self.country_var.get()
         self.populate_cities(c)
-        # update config to new country + selected city
         self.cfg["city_country"] = [self.city_var.get(), c]
         save_config(self.cfg)
-        # fetch new timings
         self.update_prayer_times()
 
     def on_city_changed(self, e=None):
@@ -465,11 +438,9 @@ class PrayerApp:
         save_config(self.cfg)
 
     def update_prayer_times(self):
-        # get selection
         city, country = self.cfg.get("city_country", DEFAULT_CONFIG["city_country"])
-        # try online first
         if is_online():
-            self.log("جاري جلب مواقيت الصلاة من الانترنت...")
+            self.log("جاري جلب مواقيت الصلاة من الإنترنت...")
             times = fetch_prayer_times_for(city, country, self.cities_map)
             if times:
                 self.timings = times
@@ -478,7 +449,7 @@ class PrayerApp:
                 self.triggered.clear()
                 return
             else:
-                self.log("فشل جلب المواقيت من API — سيتم استخدام النسخة المخزنة إن وجدت")
+                self.log("فشل جلب المواقيت من API — المحاولة بالنسخة المحلية")
         # offline fallback
         cached = safe_load_json(LOCAL_PRAYER_CACHE)
         if cached and cached.get("city") == city:
@@ -491,13 +462,12 @@ class PrayerApp:
             self.log("لا توجد مواقيت متاحة حالياً")
 
     def show_timings(self):
-        # display Arabic names
-        arabic = {"Fajr":"الفجر","Dhuhr":"الظهر","Asr":"العصر","Maghrib":"المغرب","Isha":"العشاء","Sunrise":"الشروق"}
+        ar = {"Fajr":"الفجر","Dhuhr":"الظهر","Asr":"العصر","Maghrib":"المغرب","Isha":"العشاء","Sunrise":"الشروق"}
         self.times_box.configure(state="normal")
         self.times_box.delete("1.0", "end")
-        for k in ["Fajr","Dhuhr","Asr","Maghrib","Isha"]:
-            v = self.timings.get(k, "غير متوفر")
-            self.times_box.insert("end", f"{arabic.get(k,k)} : {v}\n")
+        for key in ["Fajr","Dhuhr","Asr","Maghrib","Isha"]:
+            val = self.timings.get(key, "غير متوفر")
+            self.times_box.insert("end", f"{ar.get(key,key)} : {val}\n")
         self.times_box.configure(state="disabled")
 
     def prayer_check_loop(self):
@@ -509,7 +479,6 @@ class PrayerApp:
             for name, t in self.timings.items():
                 if name.lower() == "sunrise":
                     continue
-                # clean time strings like "05:23 (EET)" sometimes — keep HH:MM
                 t_clean = t.split(" ")[0].strip()
                 if t_clean == now and name not in self.triggered:
                     self.triggered.add(name)
@@ -521,13 +490,13 @@ class PrayerApp:
     def periodic_update_loop(self):
         while self.running:
             try:
-                # update cities/theme if remote version changed (silent)
-                update_local_files_if_version_changed()
+                perform_update_if_needed_silent()
+                # ensure theme/cities/adhan.mp3 local copies exist
+                ensure_local_data()
                 # update prayer times
                 self.update_prayer_times()
             except Exception as e:
                 print("periodic_update_loop:", e)
-            # sleep UPDATE_INTERVAL seconds but stop earlier if program closing
             for _ in range(int(UPDATE_INTERVAL/5)):
                 if not self.running:
                     break
@@ -535,7 +504,7 @@ class PrayerApp:
 
     # tray icon
     def create_tray_icon(self):
-        def _image():
+        def _img():
             img = Image.new('RGB', (64,64), color=(52,152,219))
             d = ImageDraw.Draw(img)
             d.text((18,14), "ص", fill="white")
@@ -545,13 +514,11 @@ class PrayerApp:
             pystray.MenuItem("تشغيل/إيقاف الأذان", lambda icon, item: self.toggle_adhan()),
             pystray.MenuItem("خروج", lambda icon, item: self.exit_app())
         )
-        self.tray = pystray.Icon("adhan_app", _image(), "مواقيت الصلاة", menu=menu)
-        t = threading.Thread(target=self.tray.run, daemon=True)
-        t.start()
+        self.tray = pystray.Icon("adhan_app", _img(), "مواقيت الصلاة", menu=menu)
+        threading.Thread(target=self.tray.run, daemon=True).start()
 
     def minimize_to_tray(self):
         self.root.withdraw()
-        # create tray if not exists
         if not hasattr(self, "tray") or self.tray is None:
             self.create_tray_icon()
 
@@ -588,7 +555,6 @@ class PrayerApp:
             self.root.destroy()
         except:
             pass
-        # release singleton socket
         try:
             if self.sock:
                 self.sock.close()
@@ -599,27 +565,18 @@ class PrayerApp:
     def start_background_loops(self):
         t1 = threading.Thread(target=self.prayer_check_loop, daemon=True)
         t2 = threading.Thread(target=self.periodic_update_loop, daemon=True)
-        t1.start()
-        t2.start()
-        # create tray icon thread safe
-        # don't auto-create tray until minimize, but we can create to ensure menu available
-        # self.create_tray_icon()
+        t1.start(); t2.start()
 
     def run(self):
-        # update UI labels with current timings
-        self.show_timings()
-        # schedule tkinter-based periodic UI updates
+        # UI tick
         def ui_tick():
             self.show_timings()
             self.root.after(60000, ui_tick)
         self.root.after(1000, ui_tick)
         self.root.mainloop()
 
-# ---------------- Windows Startup helper ----------------
+# --------------- Windows startup helper ---------------
 def add_to_startup():
-    """
-    Add current script to current user's Run registry so it starts on login.
-    """
     if winreg is None:
         return
     try:
@@ -630,18 +587,23 @@ def add_to_startup():
     except Exception as e:
         print("add_to_startup error:", e)
 
-# ---------------- Main ----------------
+# --------------- main ---------------
 def main():
-    # ensure local data exists (try to download theme/cities if online)
+    # ensure local copies (cities/theme/adhan.mp3)
     ensure_local_data()
-    # silent update check: if remote version higher, download and restart
+    # silent update check (may restart)
     try:
-        update_local_files_if_version_changed()
+        perform_update_if_needed_silent()
     except:
         pass
-
     app = PrayerApp()
     app.run()
 
 if __name__ == "__main__":
+    # prevent multiple instances
+    sock = check_already_running()
+    if not sock:
+        # if another instance is running, show warning and exit
+        messagebox.showwarning("تنبيه", "البرنامج مفتوح بالفعل!")
+        sys.exit(0)
     main()
